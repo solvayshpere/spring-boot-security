@@ -10,13 +10,20 @@ import com.hpuswl.springboot.filter.JwtFilter;
 import com.hpuswl.springboot.filter.JwtLoginFilter;
 import com.hpuswl.springboot.filter.MyAuthenticationFailureHandler;
 import com.hpuswl.springboot.filter.VerificationCodeFilter;
+import com.hpuswl.springboot.service.CustomUserDetailsService;
 import com.hpuswl.springboot.service.MyUserDetailService;
+import org.jasig.cas.client.session.SingleSignOutFilter;
+import org.jasig.cas.client.validation.Cas30ServiceTicketValidator;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Import;
 import org.springframework.security.authentication.AuthenticationDetailsSource;
 import org.springframework.security.authentication.AuthenticationProvider;
+import org.springframework.security.cas.ServiceProperties;
+import org.springframework.security.cas.authentication.CasAuthenticationProvider;
+import org.springframework.security.cas.web.CasAuthenticationEntryPoint;
+import org.springframework.security.cas.web.CasAuthenticationFilter;
 import org.springframework.security.config.annotation.authentication.builders.AuthenticationManagerBuilder;
 import org.springframework.security.config.annotation.method.configuration.EnableGlobalMethodSecurity;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
@@ -40,6 +47,8 @@ import org.springframework.security.web.authentication.AuthenticationFailureHand
 import org.springframework.security.web.authentication.AuthenticationSuccessHandler;
 import org.springframework.security.web.authentication.UsernamePasswordAuthenticationFilter;
 import org.springframework.security.web.authentication.WebAuthenticationDetails;
+import org.springframework.security.web.authentication.logout.LogoutFilter;
+import org.springframework.security.web.authentication.logout.SecurityContextLogoutHandler;
 import org.springframework.security.web.authentication.rememberme.JdbcTokenRepositoryImpl;
 import org.springframework.security.web.csrf.CookieCsrfTokenRepository;
 import org.springframework.security.web.session.HttpSessionEventPublisher;
@@ -69,12 +78,17 @@ public class WebSecurityConfig<S extends Session> extends WebSecurityConfigurerA
 //    @Autowired
 //    private AuthenticationProvider authenticationProvider;
 
-    @Autowired
-    private MyUserDetailService userDetailService;
+//    @Autowired
+//    private MyUserDetailService userDetailService;
 
+    @Autowired
+    private CustomUserDetailsService userDetailsService;
 
     @Autowired
     private DataSource dataSource;
+
+    @Autowired
+    private CasProperties casProperties;
 
     /* https://my.oschina.net/u/3857854/blog/3010262
     加入下面测试失败
@@ -93,11 +107,85 @@ public class WebSecurityConfig<S extends Session> extends WebSecurityConfigurerA
         return new SessionRegistryImpl();
     }
 
-    /*@Override
+    /** 定义认证用户信息获取来源，密码校验规则等 */
+    @Override
     protected void configure(AuthenticationManagerBuilder auth) throws Exception {
+        super.configure(auth);
         // 应用 AuthenticationProvider
-        auth.authenticationProvider(authenticationProvider);
-    }*/
+        // auth.authenticationProvider(authenticationProvider);
+        auth.authenticationProvider(casAuthenticationProvider());
+    }
+
+    /**cas 认证 Provider*/
+    @Bean
+    public CasAuthenticationProvider casAuthenticationProvider() {
+        CasAuthenticationProvider casAuthenticationProvider = new CasAuthenticationProvider();
+        casAuthenticationProvider.setAuthenticationUserDetailsService(userDetailsService);
+        //casAuthenticationProvider.setUserDetailsService(customUserDetailsService()); //这里只是接口类型，实现的接口不一样，都可以的。
+        casAuthenticationProvider.setServiceProperties(serviceProperties());
+        casAuthenticationProvider.setTicketValidator(cas30ServiceTicketValidator());
+        casAuthenticationProvider.setKey("casAuthenticationProviderKey");
+        return casAuthenticationProvider;
+    }
+
+    /**
+     * 指定service相关信息
+     * 配置 CAS Client 的属性
+     * */
+    @Bean
+    public ServiceProperties serviceProperties() {
+        ServiceProperties serviceProperties = new ServiceProperties();
+        // 与 CasAuthenticationFilter 监视的 URL 一致
+        serviceProperties.setService(casProperties.getAppLoginUrl());
+        // 是否关闭单点登陆，默认为 false ，可以不设置
+        // serviceProperties.setSendRenew(false);
+        serviceProperties.setAuthenticateAllArtifacts(true);
+        return serviceProperties;
+    }
+
+    /**
+     * 认证的入口
+     * CAS 验证入口，提供用户浏览器重定向地址
+     * */
+    @Bean
+    public CasAuthenticationEntryPoint casAuthenticationEntryPoint() {
+        CasAuthenticationEntryPoint casAuthenticationEntryPoint = new CasAuthenticationEntryPoint();
+        // CAS Server 认证的登陆地址
+        casAuthenticationEntryPoint.setLoginUrl(casProperties.getCasServerLoginUrl());
+        casAuthenticationEntryPoint.setServiceProperties(serviceProperties());
+        return casAuthenticationEntryPoint;
+    }
+
+    /**CAS认证过滤器*/
+    @Bean
+    public CasAuthenticationFilter casAuthenticationFilter() throws Exception {
+        CasAuthenticationFilter casAuthenticationFilter = new CasAuthenticationFilter();
+        casAuthenticationFilter.setAuthenticationManager(authenticationManager());
+        casAuthenticationFilter.setFilterProcessesUrl(casProperties.getAppLoginUrl());
+        return casAuthenticationFilter;
+    }
+
+    @Bean
+    public Cas30ServiceTicketValidator cas30ServiceTicketValidator() {
+        return new Cas30ServiceTicketValidator(casProperties.getCasServerUrl());
+    }
+
+    /**单点登出过滤器*/
+    @Bean
+    public SingleSignOutFilter singleSignOutFilter() {
+        SingleSignOutFilter singleSignOutFilter = new SingleSignOutFilter();
+        singleSignOutFilter.setCasServerUrlPrefix(casProperties.getCasServerUrl());
+        singleSignOutFilter.setIgnoreInitConfiguration(true);
+        return singleSignOutFilter;
+    }
+
+    /**请求单点退出过滤器*/
+    @Bean
+    public LogoutFilter casLogoutFilter() {
+        LogoutFilter logoutFilter = new LogoutFilter(casProperties.getCasServerLogoutUrl(), new SecurityContextLogoutHandler());
+        logoutFilter.setFilterProcessesUrl(casProperties.getAppLogoutUrl());
+        return logoutFilter;
+    }
 
     @Bean
     public Producer captcha(){
@@ -191,13 +279,13 @@ public class WebSecurityConfig<S extends Session> extends WebSecurityConfigurerA
 //                .failureHandler(new MyAuthenticationFailureHandler())
                 .and()
                 // 增加自动登陆功能，默认为简单的散列加密
-                .rememberMe().userDetailsService(userDetailService)
+                //.rememberMe().userDetailsService(userDetailService)
                 // 1. 散列加密方案
-                .key("solvaysphere")
+                //.key("solvaysphere")
                 // 2. 持久化令牌方案
-                .tokenRepository(jdbcTokenRepository)
+                //.tokenRepository(jdbcTokenRepository)
                 // 7天有效期
-                .tokenValiditySeconds(60 * 60 * 24 * 7)
+                //.tokenValiditySeconds(60 * 60 * 24 * 7)
 //                .and()
 //                .sessionManagement()
 //                .maximumSessions(1)
@@ -221,7 +309,7 @@ public class WebSecurityConfig<S extends Session> extends WebSecurityConfigurerA
                             out.write("{\"error_code\":\"401\",\"message\":\""+exception.getMessage()+"\"}");
                         }
                     })*/
-                    .and()
+                 //   .and()
                 .logout()
                 .logoutUrl("/logout")
                 // 注销成功，重定向到该路径下
@@ -253,7 +341,13 @@ public class WebSecurityConfig<S extends Session> extends WebSecurityConfigurerA
 //        http.addFilterBefore(new VerificationCodeFilter(), UsernamePasswordAuthenticationFilter.class);
 //        http.addFilterBefore(new JwtLoginFilter("/auth/login",authenticationManager()),UsernamePasswordAuthenticationFilter.class)
 //                .addFilterBefore(new JwtFilter(),UsernamePasswordAuthenticationFilter.class)
-                ;
+//                ;
+
+        http.exceptionHandling().authenticationEntryPoint(casAuthenticationEntryPoint())
+                .and()
+                .addFilter(casAuthenticationFilter())
+                .addFilterBefore(casLogoutFilter(), LogoutFilter.class)
+                .addFilterBefore(singleSignOutFilter(), CasAuthenticationFilter.class);
 
     }
 
